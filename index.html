@@ -190,6 +190,18 @@
     font-family: var(--f-ui); font-size: 12px; color: var(--faint);
     padding: 0 4px;
   }
+  .form-status {
+    margin-top: 10px; text-align: left;
+    font-family: var(--f-ui); font-size: 13px; font-weight: 500;
+    padding: 0 4px; min-height: 1.35em;
+  }
+  .form-status.ok { color: var(--sage); }
+  .form-status.err { color: #B42318; }
+  .form-wrap input.input-invalid, .cta-form input.input-invalid {
+    box-shadow: inset 0 0 0 1.5px rgba(180,35,24,0.35);
+    border-radius: var(--r-xs);
+  }
+  button:disabled { opacity: 0.65; cursor: not-allowed; transform: none; }
 
   .preview-wrap {
     position: relative; z-index: 1; max-width: 980px;
@@ -449,11 +461,12 @@
   <div class="micro-note">Built to make difficult decisions feel calmer, clearer, and more manageable.</div>
 
   <div class="form-shell" id="waitlist">
-    <div class="form-wrap">
+    <div class="form-wrap" data-waitlist-source="hero">
       <input type="email" name="email" autocomplete="email" placeholder="Enter your email address" aria-label="Email for waitlist">
       <button type="button" class="waitlist-submit">Join the waitlist</button>
     </div>
     <div class="form-note">No spam. Just launch updates and early access.</div>
+    <div class="form-status" id="waitlist-status-hero" role="status" aria-live="polite"></div>
   </div>
 </section>
 
@@ -673,11 +686,12 @@
     <h2>Be first to explore GereOM</h2>
     <p>Join the waitlist for early access to the first release of tools, guides, and learning resources.</p>
 
-    <div class="cta-form">
+    <div class="cta-form" data-waitlist-source="footer">
       <input type="email" name="email" autocomplete="email" placeholder="Enter your email address" aria-label="Email for waitlist">
       <button type="button" class="waitlist-submit">Join the waitlist</button>
     </div>
 
+    <div class="form-status" id="waitlist-status-footer" role="status" aria-live="polite"></div>
     <div class="cta-note">Early access invites will be sent before public launch.</div>
   </div>
 </section>
@@ -688,9 +702,33 @@
 
 <script>
   (function () {
+    var apiBase = typeof window.__API_BASE__ === 'string' ? window.__API_BASE__.replace(/\/$/, '') : '';
+
+    function apiUrl(path) {
+      return apiBase + path;
+    }
+
+    function trackEvent(action, detail) {
+      var body = JSON.stringify({ action: action, detail: detail || {} });
+      if (navigator.sendBeacon) {
+        var blob = new Blob([body], { type: 'application/json' });
+        navigator.sendBeacon(apiUrl('/api/event'), blob);
+        return;
+      }
+      fetch(apiUrl('/api/event'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: body,
+        keepalive: true,
+      }).catch(function () {});
+    }
+
     document.querySelectorAll('[data-scroll]').forEach(function (btn) {
       btn.addEventListener('click', function () {
         var id = btn.getAttribute('data-scroll');
+        if (btn.classList.contains('nav-btn')) trackEvent('cta_click', { target: 'nav_early_access', scrollTo: id });
+        else if (btn.classList.contains('btn-primary')) trackEvent('cta_click', { target: 'hero_request_early_access', scrollTo: id });
+        else if (btn.classList.contains('btn-secondary')) trackEvent('cta_click', { target: 'hero_see_preview', scrollTo: id });
         var el = document.getElementById(id);
         if (!el) return;
         el.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -711,6 +749,7 @@
           t.setAttribute('aria-selected', on ? 'true' : 'false');
         });
         var filter = tab.getAttribute('data-filter');
+        trackEvent('tab_filter', { filter: filter });
         mods.forEach(function (mod) {
           if (filter === 'all') {
             mod.classList.remove('is-hidden');
@@ -722,30 +761,85 @@
       });
     });
 
-    function wireWaitlist(root) {
+    function setFormStatus(el, msg, kind) {
+      if (!el) return;
+      el.textContent = msg || '';
+      el.classList.remove('ok', 'err');
+      if (kind) el.classList.add(kind);
+    }
+
+    function wireWaitlist(root, statusEl) {
       var input = root.querySelector('input[type="email"]');
       var btn = root.querySelector('.waitlist-submit');
+      var source = (root.getAttribute('data-waitlist-source') || 'unknown').toLowerCase();
       if (!input || !btn) return;
-      var label = btn.textContent;
-      btn.addEventListener('click', function (e) {
-        e.preventDefault();
+      var label = btn.textContent.trim();
+
+      function submit() {
         var v = (input.value || '').trim();
+        input.classList.remove('input-invalid');
+        setFormStatus(statusEl, '', null);
         if (!v) {
+          input.classList.add('input-invalid');
           input.focus();
+          setFormStatus(statusEl, 'Please enter a valid email address.', 'err');
           return;
         }
-        btn.textContent = 'You’re on the list';
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) {
+          input.classList.add('input-invalid');
+          input.focus();
+          setFormStatus(statusEl, 'That doesn’t look like a valid email.', 'err');
+          return;
+        }
         btn.disabled = true;
-        setTimeout(function () {
-          btn.textContent = label;
-          btn.disabled = false;
-        }, 2400);
+        btn.textContent = 'Saving…';
+        fetch(apiUrl('/api/waitlist'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: v, source: source }),
+        })
+          .then(function (r) {
+            return r.json().then(function (data) {
+              return { ok: r.ok, data: data };
+            });
+          })
+          .then(function (res) {
+            btn.disabled = false;
+            btn.textContent = label;
+            if (!res.ok || !res.data || !res.data.ok) {
+              setFormStatus(statusEl, 'Something went wrong. Please try again in a moment.', 'err');
+              trackEvent('waitlist_error', { source: source });
+              return;
+            }
+            if (res.data.duplicate) {
+              setFormStatus(statusEl, 'You’re already on the list — we’ll be in touch.', 'ok');
+            } else {
+              setFormStatus(statusEl, 'You’re on the list. Thank you!', 'ok');
+            }
+            trackEvent('waitlist_signup', { source: source, duplicate: !!res.data.duplicate });
+          })
+          .catch(function () {
+            btn.disabled = false;
+            btn.textContent = label;
+            setFormStatus(statusEl, 'Can’t reach the server. Run the app with `npm start` or check your connection.', 'err');
+            trackEvent('waitlist_network_error', { source: source });
+          });
+      }
+
+      btn.addEventListener('click', function (e) {
+        e.preventDefault();
+        submit();
+      });
+      input.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          submit();
+        }
       });
     }
-    var heroForm = document.querySelector('#waitlist .form-wrap');
-    var ctaForm = document.querySelector('.bottom-cta .cta-form');
-    if (heroForm) wireWaitlist(heroForm);
-    if (ctaForm) wireWaitlist(ctaForm);
+
+    wireWaitlist(document.querySelector('#waitlist .form-wrap'), document.getElementById('waitlist-status-hero'));
+    wireWaitlist(document.querySelector('.bottom-cta .cta-form'), document.getElementById('waitlist-status-footer'));
   })();
 </script>
 
