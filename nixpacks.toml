@@ -1,0 +1,2 @@
+# Prefer Node when both HTML and package.json exist at repo root.
+providers = ["node"]

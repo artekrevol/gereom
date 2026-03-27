@@ -17,6 +17,7 @@ const pool = new Pool({
   ssl: process.env.PGSSLMODE === 'disable' ? false : { rejectUnauthorized: false },
 });
 
+/** One statement per round-trip — Railway’s DB proxy rejects some multi-statement batches. */
 async function initDb() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS waitlist_signups (
@@ -24,18 +25,20 @@ async function initDb() {
       email TEXT NOT NULL,
       source TEXT NOT NULL DEFAULT 'unknown',
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    );
-    CREATE UNIQUE INDEX IF NOT EXISTS waitlist_signups_email_unique ON waitlist_signups (email);
-  `);
+    )`);
+  await pool.query(
+    'CREATE UNIQUE INDEX IF NOT EXISTS waitlist_signups_email_unique ON waitlist_signups (email)'
+  );
   await pool.query(`
     CREATE TABLE IF NOT EXISTS site_events (
       id SERIAL PRIMARY KEY,
       action TEXT NOT NULL,
       detail JSONB,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    );
-    CREATE INDEX IF NOT EXISTS site_events_action_idx ON site_events (action);
-  `);
+    )`);
+  await pool.query(
+    'CREATE INDEX IF NOT EXISTS site_events_action_idx ON site_events (action)'
+  );
 }
 
 const app = express();
@@ -116,9 +119,16 @@ app.get('/api/health', async (_req, res) => {
 app.use(express.static(path.join(__dirname)));
 
 async function main() {
-  await initDb();
-  app.listen(PORT, () => {
-    console.log(`GereOM server http://localhost:${PORT}`);
+  try {
+    await initDb();
+    console.log('Database schema ready.');
+  } catch (e) {
+    console.error('initDb failed:', e && e.message ? e.message : e);
+    throw e;
+  }
+  const host = '0.0.0.0';
+  app.listen(PORT, host, () => {
+    console.log(`GereOM listening on ${host}:${PORT}`);
   });
 }
 
